@@ -41,4 +41,60 @@ describe("normalizeModelCompat", () => {
     const normalized = normalizeModelCompat(model);
     expect(normalized.compat?.supportsDeveloperRole).toBe(false);
   });
+
+  it("forces supportsStore off for amazon-bedrock provider", () => {
+    const model = {
+      ...baseModel(),
+      provider: "amazon-bedrock",
+      baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    };
+    delete (model as { compat?: unknown }).compat;
+    const normalized = normalizeModelCompat(model);
+    expect(normalized.compat?.supportsStore).toBe(false);
+  });
+
+  it("forces supportsStore off for litellm baseUrl", () => {
+    const model = {
+      ...baseModel(),
+      provider: "openai",
+      baseUrl: "https://my-litellm-proxy.example.com/v1",
+    };
+    delete (model as { compat?: unknown }).compat;
+    const normalized = normalizeModelCompat(model);
+    expect(normalized.compat?.supportsStore).toBe(false);
+  });
+
+  it("forces supportsStore off for bedrock in baseUrl", () => {
+    const model = {
+      ...baseModel(),
+      provider: "custom",
+      baseUrl: "https://my-bedrock-proxy.example.com/v1",
+    };
+    delete (model as { compat?: unknown }).compat;
+    const normalized = normalizeModelCompat(model);
+    expect(normalized.compat?.supportsStore).toBe(false);
+  });
+
+  it("does not override explicit supportsStore false for bedrock", () => {
+    const model = {
+      ...baseModel(),
+      provider: "amazon-bedrock",
+      baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    };
+    model.compat = { supportsStore: false };
+    const normalized = normalizeModelCompat(model);
+    expect(normalized.compat?.supportsStore).toBe(false);
+  });
+
+  it("preserves existing compat fields when adding supportsStore for bedrock", () => {
+    const model = {
+      ...baseModel(),
+      provider: "amazon-bedrock",
+      baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    };
+    model.compat = { supportsDeveloperRole: true };
+    const normalized = normalizeModelCompat(model);
+    expect(normalized.compat?.supportsStore).toBe(false);
+    expect(normalized.compat?.supportsDeveloperRole).toBe(true);
+  });
 });
