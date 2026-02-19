@@ -1,9 +1,16 @@
+import { HttpError } from "grammy";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildCappedTelegramMenuCommands,
   buildPluginTelegramMenuCommands,
   syncTelegramMenuCommands,
 } from "./bot-native-command-menu.js";
+
+/** Create a grammY-style HttpError that wraps a network failure. */
+function makeNetworkHttpError(method: string): HttpError {
+  const inner = new TypeError("fetch failed");
+  return new HttpError(`Network request for '${method}' failed!`, inner);
+}
 
 describe("bot-native-command-menu", () => {
   it("caps menu entries to Telegram limit", () => {
@@ -85,5 +92,99 @@ describe("bot-native-command-menu", () => {
     });
 
     expect(callOrder).toEqual(["delete", "set"]);
+  });
+
+  it("retries on transient network errors then succeeds", async () => {
+    let callCount = 0;
+    const setMyCommands = vi.fn(async () => {
+      callCount++;
+      if (callCount < 3) {
+        throw makeNetworkHttpError("setMyCommands");
+      }
+    });
+    const deleteMyCommands = vi.fn(async () => {});
+    const errorLog = vi.fn();
+
+    syncTelegramMenuCommands({
+      bot: {
+        api: { deleteMyCommands, setMyCommands },
+      } as unknown as Parameters<typeof syncTelegramMenuCommands>[0]["bot"],
+      runtime: { error: errorLog } as unknown as Parameters<
+        typeof syncTelegramMenuCommands
+      >[0]["runtime"],
+      commandsToRegister: [{ command: "cmd", description: "Command" }],
+      _maxRetries: 3,
+      _backoff: { initialMs: 1, maxMs: 5, factor: 1, jitter: 0 },
+    });
+
+    await vi.waitFor(() => {
+      expect(setMyCommands).toHaveBeenCalledTimes(3);
+    });
+
+    // Should have logged retry messages for attempts 1 and 2
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("command sync attempt 1 failed"));
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("command sync attempt 2 failed"));
+    // Should NOT have logged a final "command sync failed" since attempt 3 succeeded
+    expect(errorLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("[telegram] command sync failed:"),
+    );
+  });
+
+  it("gives up after exhausting retries on persistent network errors", async () => {
+    const setMyCommands = vi.fn(async () => {
+      throw makeNetworkHttpError("setMyCommands");
+    });
+    const deleteMyCommands = vi.fn(async () => {});
+    const errorLog = vi.fn();
+
+    syncTelegramMenuCommands({
+      bot: {
+        api: { deleteMyCommands, setMyCommands },
+      } as unknown as Parameters<typeof syncTelegramMenuCommands>[0]["bot"],
+      runtime: { error: errorLog } as unknown as Parameters<
+        typeof syncTelegramMenuCommands
+      >[0]["runtime"],
+      commandsToRegister: [{ command: "cmd", description: "Command" }],
+      _maxRetries: 2,
+      _backoff: { initialMs: 1, maxMs: 5, factor: 1, jitter: 0 },
+    });
+
+    await vi.waitFor(() => {
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("[telegram] command sync failed:"),
+      );
+    });
+
+    // Initial attempt + 2 retries = 3 calls total
+    expect(setMyCommands).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry non-recoverable errors", async () => {
+    const setMyCommands = vi.fn(async () => {
+      throw new Error("Unauthorized: bot token is invalid");
+    });
+    const deleteMyCommands = vi.fn(async () => {});
+    const errorLog = vi.fn();
+
+    syncTelegramMenuCommands({
+      bot: {
+        api: { deleteMyCommands, setMyCommands },
+      } as unknown as Parameters<typeof syncTelegramMenuCommands>[0]["bot"],
+      runtime: { error: errorLog } as unknown as Parameters<
+        typeof syncTelegramMenuCommands
+      >[0]["runtime"],
+      commandsToRegister: [{ command: "cmd", description: "Command" }],
+      _maxRetries: 3,
+      _backoff: { initialMs: 1, maxMs: 5, factor: 1, jitter: 0 },
+    });
+
+    await vi.waitFor(() => {
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("[telegram] command sync failed:"),
+      );
+    });
+
+    // Only called once — no retries for non-recoverable errors
+    expect(setMyCommands).toHaveBeenCalledTimes(1);
   });
 });

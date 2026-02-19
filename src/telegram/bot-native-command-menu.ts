@@ -3,8 +3,10 @@ import {
   normalizeTelegramCommandName,
   TELEGRAM_COMMAND_NAME_PATTERN,
 } from "../config/telegram-custom-commands.js";
+import { type BackoffPolicy, computeBackoff, sleepWithAbort } from "../infra/backoff.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
+import { isRecoverableTelegramNetworkError } from "./network-errors.js";
 
 export const TELEGRAM_MAX_COMMANDS = 100;
 
@@ -73,13 +75,29 @@ export function buildCappedTelegramMenuCommands(params: {
   return { commandsToRegister, totalCommands, maxCommands, overflowCount };
 }
 
+const COMMAND_SYNC_BACKOFF: BackoffPolicy = {
+  initialMs: 2000,
+  maxMs: 15_000,
+  factor: 2,
+  jitter: 0.25,
+};
+
+const COMMAND_SYNC_MAX_RETRIES = 3;
+
 export function syncTelegramMenuCommands(params: {
   bot: Bot;
   runtime: RuntimeEnv;
   commandsToRegister: TelegramMenuCommand[];
+  /** Override for testing. */
+  _maxRetries?: number;
+  /** Override for testing. */
+  _backoff?: BackoffPolicy;
 }): void {
   const { bot, runtime, commandsToRegister } = params;
-  const sync = async () => {
+  const maxRetries = params._maxRetries ?? COMMAND_SYNC_MAX_RETRIES;
+  const backoff = params._backoff ?? COMMAND_SYNC_BACKOFF;
+
+  const syncOnce = async () => {
     // Keep delete -> set ordering to avoid stale deletions racing after fresh registrations.
     if (typeof bot.api.deleteMyCommands === "function") {
       await withTelegramApiErrorLogging({
@@ -100,7 +118,25 @@ export function syncTelegramMenuCommands(params: {
     });
   };
 
-  void sync().catch((err) => {
-    runtime.error?.(`Telegram command sync failed: ${String(err)}`);
+  const syncWithRetry = async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await syncOnce();
+        return;
+      } catch (err) {
+        if (attempt >= maxRetries || !isRecoverableTelegramNetworkError(err)) {
+          throw err;
+        }
+        const delayMs = computeBackoff(backoff, attempt + 1);
+        runtime.error?.(
+          `[telegram] command sync attempt ${attempt + 1} failed, retrying in ${delayMs}ms…`,
+        );
+        await sleepWithAbort(delayMs);
+      }
+    }
+  };
+
+  void syncWithRetry().catch((err) => {
+    runtime.error?.(`[telegram] command sync failed: ${String(err)}`);
   });
 }
