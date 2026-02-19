@@ -1,5 +1,6 @@
 import type { BaseProbeResult } from "../channels/plugins/types.js";
 import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+import { applyTelegramNetworkWorkarounds } from "./fetch.js";
 import { makeProxyFetch } from "./proxy.js";
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -23,6 +24,8 @@ export async function probeTelegram(
   proxyUrl?: string,
 ): Promise<TelegramProbe> {
   const started = Date.now();
+  // Ensure IPv4 fallback is enabled before any network call (Node 22+ workaround).
+  applyTelegramNetworkWorkarounds();
   const fetcher = proxyUrl ? makeProxyFetch(proxyUrl) : fetch;
   const base = `${TELEGRAM_API_BASE}/bot${token}`;
   const retryDelayMs = Math.max(50, Math.min(1000, timeoutMs));
